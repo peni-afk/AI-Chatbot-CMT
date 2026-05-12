@@ -1,0 +1,177 @@
+const fs = require('fs');
+const path = require('path');
+const XLSX = require('xlsx');
+
+const DOCS_DIR = path.join(__dirname, 'documents');
+const OUTPUT_FILE = path.join(__dirname, 'knowledge-base.json');
+
+function parseExcel(filePath) {
+  const workbook = XLSX.readFile(filePath);
+  let output = '';
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+    if (data.length === 0) continue;
+
+    // Skip hidden/backend sheets
+    if (sheetName.startsWith('_') || sheetName === 'Backend') continue;
+
+    output += `\n## Sheet: ${sheetName}\n`;
+
+    const headers = data[0];
+    if (!headers || headers.length === 0) continue;
+
+    // For large datasets, include headers + stats + sample
+    if (data.length > 50) {
+      output += `Columns: ${headers.join(', ')}\n`;
+      output += `Total rows: ${data.length - 1}\n\n`;
+
+      // Include first 30 rows as sample
+      output += '| ' + headers.join(' | ') + ' |\n';
+      output += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
+      const sampleSize = Math.min(30, data.length - 1);
+      for (let i = 1; i <= sampleSize; i++) {
+        const row = data[i];
+        output += '| ' + headers.map((_, j) => row[j] !== undefined ? String(row[j]).substring(0, 50) : '').join(' | ') + ' |\n';
+      }
+
+      // Add summary statistics for numeric columns
+      output += '\n### Statistics:\n';
+      headers.forEach((header, j) => {
+        if (!header) return;
+        const values = data.slice(1).map(row => row[j]).filter(v => typeof v === 'number');
+        if (values.length > 0) {
+          const sum = values.reduce((a, b) => a + b, 0);
+          const avg = sum / values.length;
+          const min = Math.min(...values);
+          const max = Math.max(...values);
+          output += `- ${header}: min=${min.toFixed(2)}, max=${max.toFixed(2)}, avg=${avg.toFixed(2)}, count=${values.length}\n`;
+        }
+      });
+
+      // Group summaries for sales data
+      const orgCol = headers.findIndex(h => h && String(h).includes('Organization'));
+      const monthCol = headers.findIndex(h => h && String(h).includes('Month'));
+      if (orgCol >= 0) {
+        const orgs = [...new Set(data.slice(1).map(r => r[orgCol]).filter(Boolean))];
+        output += `\nOrganizations: ${orgs.join(', ')}\n`;
+      }
+      if (monthCol >= 0) {
+        const months = [...new Set(data.slice(1).map(r => r[monthCol]).filter(Boolean))];
+        output += `Periods: ${months.join(', ')}\n`;
+      }
+
+      // Include ALL data as a separate section for detailed queries
+      output += '\n### Full data:\n';
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const rowStr = headers.map((h, j) => {
+          if (!h || row[j] === undefined || row[j] === '') return null;
+          return `${h}: ${row[j]}`;
+        }).filter(Boolean).join(' | ');
+        if (rowStr) output += rowStr + '\n';
+      }
+    } else {
+      // Small datasets - include everything as table
+      output += '| ' + headers.join(' | ') + ' |\n';
+      output += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        output += '| ' + headers.map((_, j) => row[j] !== undefined ? String(row[j]) : '').join(' | ') + ' |\n';
+      }
+    }
+  }
+
+  return output;
+}
+
+function parseCSV(filePath) {
+  const text = fs.readFileSync(filePath, 'utf-8');
+  return text;
+}
+
+function parseTXT(filePath) {
+  return fs.readFileSync(filePath, 'utf-8');
+}
+
+function processDocuments() {
+  if (!fs.existsSync(DOCS_DIR)) {
+    console.log('No documents directory found');
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ documents: [] }));
+    return;
+  }
+
+  const files = fs.readdirSync(DOCS_DIR).filter(f => !f.startsWith('.'));
+  const documents = [];
+
+  for (const filename of files) {
+    const filePath = path.join(DOCS_DIR, filename);
+    const ext = path.extname(filename).toLowerCase();
+
+    console.log(`Processing: ${filename} (${ext})`);
+
+    let content = '';
+    let type = 'unknown';
+
+    try {
+      switch (ext) {
+        case '.xlsx':
+        case '.xls':
+          content = parseExcel(filePath);
+          type = 'excel';
+          break;
+        case '.csv':
+          content = parseCSV(filePath);
+          type = 'csv';
+          break;
+        case '.txt':
+        case '.md':
+          content = parseTXT(filePath);
+          type = 'text';
+          break;
+        case '.pptx':
+          // PPTX needs special handling - store raw for now
+          // Will be handled by the function
+          content = `[PowerPoint file: ${filename} - content extracted at query time]`;
+          type = 'pptx';
+          break;
+        case '.pdf':
+          content = `[PDF file: ${filename} - content extracted at query time]`;
+          type = 'pdf';
+          break;
+        case '.docx':
+          content = `[Word file: ${filename} - content extracted at query time]`;
+          type = 'docx';
+          break;
+        default:
+          console.log(`  Skipping unsupported format: ${ext}`);
+          continue;
+      }
+
+      // Truncate very large documents
+      const MAX_CHARS = 80000;
+      if (content.length > MAX_CHARS) {
+        content = content.substring(0, MAX_CHARS) + '\n\n[... document truncated ...]';
+      }
+
+      documents.push({
+        filename,
+        type,
+        content,
+        size: content.length,
+        processedAt: new Date().toISOString(),
+      });
+
+      console.log(`  OK: ${content.length} chars`);
+    } catch (err) {
+      console.error(`  ERROR processing ${filename}:`, err.message);
+    }
+  }
+
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ documents }, null, 2));
+  console.log(`\nKnowledge base created: ${documents.length} documents`);
+}
+
+processDocuments();
