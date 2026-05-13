@@ -96,7 +96,7 @@ body{font-family:'DM Sans',-apple-system,sans-serif;background:var(--bg);color:v
 <button class="attach" onclick="document.getElementById('fu').click()" title="Učitaj datoteku">
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
 </button>
-<input type="file" id="fu" accept=".txt,.csv,.md,.json,.xml,.html,.log,.tsv" style="display:none">
+<input type="file" id="fu" accept=".txt,.csv,.md,.json,.xml,.html,.log,.tsv,.xlsx,.xls,.docx,.doc,.pdf,.pptx,.ppt" style="display:none">
 <textarea id="mi" placeholder="Napiši poruku..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
 <button class="s-btn" id="sb" onclick="send()" disabled>
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -105,7 +105,12 @@ body{font-family:'DM Sans',-apple-system,sans-serif;background:var(--bg);color:v
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
+if(typeof pdfjsLib!=='undefined')pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
 let msgs=[],gen=false,key=localStorage.getItem('oai_key')||'',fileCtx='',fileName='';
 if(!key)document.getElementById('km').style.display='flex';
 const mi=document.getElementById('mi');
@@ -113,19 +118,68 @@ mi.addEventListener('input',function(){this.style.height='auto';this.style.heigh
 
 function saveK(){const k=document.getElementById('ki').value.trim();if(k&&k.startsWith('sk-')){key=k;localStorage.setItem('oai_key',k);document.getElementById('km').style.display='none'}else alert('Ključ mora počinjati sa sk-')}
 
-// File handling
-document.getElementById('fu').addEventListener('change',function(e){
-const f=e.target.files[0];if(!f)return;
-const reader=new FileReader();
-reader.onload=function(ev){
-fileCtx=ev.target.result;
+function showFile(name,text){
+fileCtx=text;
 if(fileCtx.length>100000)fileCtx=fileCtx.substring(0,100000)+'\n[... skraćeno ...]';
-fileName=f.name;
-document.getElementById('fn').textContent=f.name;
+fileName=name;
+document.getElementById('fn').textContent=name;
 document.getElementById('fs').textContent='('+Math.round(fileCtx.length/1024)+' KB)';
 document.getElementById('fi').style.display='flex';
 document.getElementById('sb').disabled=false;
-};reader.readAsText(f);
+}
+
+async function parseXLSX(buffer,name){
+const wb=XLSX.read(buffer,{type:'array'});
+let out='';
+for(const sn of wb.SheetNames){
+const ws=wb.Sheets[sn];
+const data=XLSX.utils.sheet_to_json(ws,{header:1});
+if(!data.length)continue;
+out+='## Sheet: '+sn+'\n';
+const h=data[0];
+out+='| '+h.join(' | ')+' |\n';
+out+='| '+h.map(()=>'---').join(' | ')+' |\n';
+for(let i=1;i<data.length;i++){
+out+='| '+h.map((_,j)=>data[i][j]!==undefined?String(data[i][j]).substring(0,50):'').join(' | ')+' |\n';
+}
+out+='\n';
+}
+showFile(name,out);
+}
+
+async function parseDOCX(buffer,name){
+const result=await mammoth.extractRawText({arrayBuffer:buffer});
+showFile(name,result.value);
+}
+
+async function parsePDF(buffer,name){
+const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
+let text='';
+for(let i=1;i<=pdf.numPages;i++){
+const page=await pdf.getPage(i);
+const content=await page.getTextContent();
+text+=content.items.map(item=>item.str).join(' ')+'\n\n';
+}
+showFile(name,text);
+}
+
+// File handling
+document.getElementById('fu').addEventListener('change',async function(e){
+const f=e.target.files[0];if(!f)return;
+const ext=f.name.split('.').pop().toLowerCase();
+const buffer=await f.arrayBuffer();
+try{
+if(ext==='xlsx'||ext==='xls')await parseXLSX(buffer,f.name);
+else if(ext==='docx'||ext==='doc')await parseDOCX(buffer,f.name);
+else if(ext==='pdf')await parsePDF(buffer,f.name);
+else if(ext==='pptx'||ext==='ppt'){
+const zip=XLSX.read(buffer,{type:'array',bookSheets:true});
+showFile(f.name,'[PowerPoint] Detektirani sheetovi: '+Object.keys(zip).join(', ')+'. Za najbolje rezultate, exportaj prezentaciju kao PDF ili kopiraj tekst.');}
+else{const text=new TextDecoder().decode(buffer);showFile(f.name,text);}
+}catch(err){
+alert('Greška pri čitanju datoteke: '+err.message);
+console.error(err);}
+this.value='';
 });
 function clearFile(){fileCtx='';fileName='';document.getElementById('fi').style.display='none';document.getElementById('sb').disabled=!mi.value.trim()}
 
